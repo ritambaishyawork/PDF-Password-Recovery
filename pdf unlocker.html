@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Password Recovery</title>
+  <script src="https://unpkg.com/pdfjs-dist@3.4.120/build/pdf.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f5f5f5;
+      color: #333;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      background-color: #fff;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      max-width: 400px;
+      width: 100%;
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 24px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: bold;
+      text-align: left;
+    }
+
+    input[type="file"],
+    input[type="text"],
+    button {
+      width: 80%;
+      padding: 10px;
+      margin-bottom: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+    }
+
+    .btn-group {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+
+    .btn-group button {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      background-color: #f5f5f5;
+      color: #333;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    .btn-group button.active {
+      background-color: #007bff;
+      color: #fff;
+    }
+
+    .btn-group button:not(:last-child) {
+      border-right: none;
+    }
+
+    button {
+      background-color: #007bff;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      transition: background-color 0.3s ease;
+    }
+
+    button:hover {
+      background-color: #0056b3;
+    }
+
+    .progress-container {
+      width: 100%;
+      background-color: #e0e0e0;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 16px;
+    }
+
+    .progress-bar {
+      height: 20px;
+      background-color: #007bff;
+      width: 0;
+      transition: width 0.3s ease;
+    }
+
+    .memory-usage {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #666;
+    }
+
+    .resume-section {
+      margin-top: 20px;
+      text-align: left;
+      display: none; /* Initially hidden */
+    }
+
+    #resumeError {
+      color: #ff4444;
+      font-size: 12px;
+    }
+
+    #output {
+      margin-top: 20px;
+      font-size: 16px;
+      font-weight: bold;
+    }
+
+    .toggle-btn {
+      background-color: #6c757d;
+    }
+
+    .toggle-btn:hover {
+      background-color: #5a6268;
+    }
+
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PDF Password Recovery</h1>
+
+    <label for="pdfFile">Select PDF file:</label>
+    <input type="file" id="pdfFile" accept="application/pdf">
+
+    <label for="passwordPattern">Enter password pattern (use <code>?</code> for unknown characters):</label>
+    <input type="text" id="passwordPattern" placeholder="e.g., P?ssw?rd12?">
+
+    <div class="btn-group">
+      <button id="useUppercaseBtn">Uppercase (A-Z)</button>
+      <button id="useLowercaseBtn">Lowercase (a-z)</button>
+      <button id="useNumbersBtn">Numbers (0-9)</button>
+      <button id="useSpecialCharsBtn">Special Characters</button>
+    </div>
+
+    <input type="text" id="specialChars" class="hidden" value="!@#$%^&*" placeholder="e.g., !@#$%^&*">
+
+    <button id="unlockBtn">Start Recovery</button>
+    <button id="stopBtn" style="display: none;">Pause</button>
+    <button id="toggleResumeBtn" class="toggle-btn">Resume from specific password</button>
+
+    <div class="resume-section" id="resumeSection">
+      <label for="resumePassword">Resume from specific password:</label>
+      <input type="text" id="resumePassword" placeholder="Enter known starting point">
+      <button id="resumeBtn">Start From Here</button>
+      <div id="resumeError"></div>
+    </div>
+
+    <div id="output">Ready to start...</div>
+    <div class="memory-usage" id="memoryUsage"></div>
+
+    <div class="progress-container">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.4.120/build/pdf.worker.min.js";
+
+    const recoveryState = {
+      isRunning: false,
+      currentIndex: 0,
+      totalAttempts: 0,
+      missingIndexes: [],
+      pattern: '',
+      fileInfo: null
+    };
+    
+    const BATCH_SIZE = 50;
+    const BATCH_DELAY = 100;
+    const CANDIDATES = {
+      useUppercase: "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+      useLowercase: "abcdefghijklmnopqrstuvwxyz",
+      useNumbers: "0123456789",
+      specialChars: ""
+    };
+    let pdfBytes = null;
+
+    // Event Listeners
+    document.getElementById('unlockBtn').addEventListener('click', startRecovery);
+    document.getElementById('stopBtn').addEventListener('click', toggleRecovery);
+    document.getElementById('pdfFile').addEventListener('change', handleFileChange);
+    document.getElementById('passwordPattern').addEventListener('input', handlePatternChange);
+    document.getElementById('resumeBtn').addEventListener('click', startFromSpecificPassword);
+    document.getElementById('toggleResumeBtn').addEventListener('click', toggleResumeSection);
+
+    document.getElementById('useUppercaseBtn').addEventListener('click', () => toggleButton('useUppercaseBtn'));
+    document.getElementById('useLowercaseBtn').addEventListener('click', () => toggleButton('useLowercaseBtn'));
+    document.getElementById('useNumbersBtn').addEventListener('click', () => toggleButton('useNumbersBtn'));
+    document.getElementById('useSpecialCharsBtn').addEventListener('click', toggleSpecialCharsField);
+
+    function handleFileChange() {
+      clearRecoveryState();
+      pdfBytes = null;
+    }
+
+    function handlePatternChange() {
+      clearRecoveryState();
+    }
+
+    function clearRecoveryState() {
+      localStorage.removeItem('pdfRecoveryState');
+      recoveryState.currentIndex = 0;
+      document.getElementById('resumeError').textContent = '';
+    }
+
+    function getCandidates() {
+      let candidates = '';
+      if (document.getElementById('useUppercaseBtn').classList.contains('active')) candidates += CANDIDATES.useUppercase;
+      if (document.getElementById('useLowercaseBtn').classList.contains('active')) candidates += CANDIDATES.useLowercase;
+      if (document.getElementById('useNumbersBtn').classList.contains('active')) candidates += CANDIDATES.useNumbers;
+      if (document.getElementById('specialChars').classList.contains('active')) candidates += document.getElementById('specialChars').value;
+      return candidates;
+    }
+
+    async function startRecovery() {
+      const fileInput = document.getElementById('pdfFile');
+      const patternInput = document.getElementById('passwordPattern').value;
+      
+      if (!validateInputs(fileInput, patternInput)) return;
+
+      try {
+        await initializeRecovery(fileInput.files[0], patternInput);
+        recoveryState.isRunning = true;
+        updateUIState(true);
+        processBatch();
+      } catch (error) {
+        showError(error.message);
+      }
+    }
+
+    async function startFromSpecificPassword() {
+      const resumeInput = document.getElementById('resumePassword').value;
+      const pattern = document.getElementById('passwordPattern').value;
+      const fileInput = document.getElementById('pdfFile');
+      
+      if (!validateInputs(fileInput, pattern) || !validateResumeInput(resumeInput, pattern)) return;
+
+      try {
+        const startIndex = calculatePasswordIndex(resumeInput, pattern, getCandidates());
+        await initializeRecovery(fileInput.files[0], pattern, startIndex);
+        
+        recoveryState.isRunning = true;
+        updateUIState(true);
+        processBatch();
+      } catch (error) {
+        document.getElementById('resumeError').textContent = error.message;
+      }
+    }
+
+    function validateInputs(fileInput, pattern) {
+      if (!fileInput.files.length) {
+        alert("Please select a PDF file.");
+        return false;
+      }
+      
+      const missingChars = [...pattern].filter(c => c === '?').length;
+      if (missingChars === 0) {
+        alert("Pattern must contain at least one '?' character.");
+        return false;
+      }
+      
+      return true;
+    }
+
+    function validateResumeInput(password, pattern) {
+      const errorDiv = document.getElementById('resumeError');
+      errorDiv.textContent = '';
+      
+      if (password.length !== pattern.length) {
+        errorDiv.textContent = 'Password length must match pattern length';
+        return false;
+      }
+      
+      const validChars = new RegExp(`^[${getCandidates()}?]+$`);
+      if (!validChars.test(password)) {
+        errorDiv.textContent = `Contains invalid characters (allowed: ${getCandidates()})`;
+        return false;
+      }
+
+      for (let i = 0; i < pattern.length; i++) {
+        if (pattern[i] !== '?' && password[i] !== pattern[i]) {
+          errorDiv.textContent = `Character at position ${i+1} should be '${pattern[i]}'`;
+          return false;
+        }
+      }
+      
+      return true;
+    }
+
+    function calculatePasswordIndex(password, pattern, candidates) {
+      const missingIndexes = getMissingIndexes(pattern);
+      let index = 0;
+      
+      for (let i = 0; i < missingIndexes.length; i++) {
+        const pos = missingIndexes[i];
+        const char = password[pos];
+        const value = candidates.indexOf(char);
+        
+        if (value === -1) {
+          throw new Error(`Invalid character '${char}' at position ${pos+1}`);
+        }
+        
+        index = index * candidates.length + value;
+      }
+      
+      return index;
+    }
+
+    async function initializeRecovery(file, pattern, startIndex = 0) {
+      if (!pdfBytes) {
+        const buffer = await file.arrayBuffer();
+        pdfBytes = new Uint8Array(buffer);
+      }
+
+      const missingIndexes = getMissingIndexes(pattern);
+      const candidates = getCandidates();
+      const totalAttempts = Math.pow(candidates.length, missingIndexes.length);
+      
+      const savedState = checkSavedState(file, pattern);
+      
+      Object.assign(recoveryState, {
+        currentIndex: savedState ? savedState.currentIndex : startIndex,
+        totalAttempts,
+        missingIndexes,
+        pattern,
+        fileInfo: getFileInfo(file)
+      });
+    }
+
+    function getMissingIndexes(pattern) {
+      return [...pattern]
+        .map((char, index) => char === '?' ? index : -1)
+        .filter(index => index !== -1);
+    }
+
+    function checkSavedState(file, pattern) {
+      const savedState = localStorage.getItem('pdfRecoveryState');
+      if (!savedState) return null;
+
+      const parsedState = JSON.parse(savedState);
+      const fileMatches = parsedState.fileInfo.name === file.name &&
+                         parsedState.fileInfo.size === file.size &&
+                         parsedState.fileInfo.lastModified === file.lastModified;
+      
+      if (fileMatches && parsedState.pattern === pattern) {
+        return confirm('Resume previous recovery?') ? parsedState : null;
+      }
+      return null;
+    }
+
+    function getFileInfo(file) {
+      return {
+        name: file.name,
+        size: file.size,
+        lastModified: file.lastModified
+      };
+    }
+
+    async function processBatch() {
+      const { currentIndex, totalAttempts } = recoveryState;
+      const batchEnd = Math.min(currentIndex + BATCH_SIZE, totalAttempts);
+
+      for (let i = currentIndex; i < batchEnd && recoveryState.isRunning; i++) {
+        const password = generatePassword(i, getCandidates());
+        updateProgress(i, password);
+        
+        if (await tryPassword(password)) {
+          handleSuccess(password);
+          return;
+        }
+      }
+
+      recoveryState.currentIndex = batchEnd;
+      updateMemoryUsage();
+      saveProgress();
+
+      if (recoveryState.currentIndex >= totalAttempts) {
+        handleCompletion();
+        return;
+      }
+
+      if (recoveryState.isRunning) {
+        setTimeout(processBatch, BATCH_DELAY);
+      }
+    }
+
+    function generatePassword(index, candidates) {
+      const chars = [...recoveryState.pattern];
+      let remaining = index;
+      
+      for (let i = recoveryState.missingIndexes.length - 1; i >= 0; i--) {
+        const pos = recoveryState.missingIndexes[i];
+        chars[pos] = candidates[remaining % candidates.length];
+        remaining = Math.floor(remaining / candidates.length);
+      }
+      
+      return chars.join('');
+    }
+
+    async function tryPassword(password) {
+      try {
+        const loadingTask = pdfjsLib.getDocument({
+          data: new Uint8Array(pdfBytes),
+          password: password
+        });
+        
+        const pdf = await loadingTask.promise;
+        await pdf.destroy();
+        return true;
+      } catch (error) {
+        if (error.name !== 'PasswordException') console.error(error);
+        return false;
+      }
+    }
+
+    function updateProgress(index, password) {
+      const progress = ((index + 1) / recoveryState.totalAttempts) * 100;
+      document.getElementById('output').textContent = 
+        `Testing: ${password} (${index + 1}/${recoveryState.totalAttempts})`;
+      document.getElementById('progressBar').style.width = `${progress}%`;
+    }
+
+    function handleSuccess(password) {
+      document.getElementById('output').textContent = `Password Found: ${password}`;
+      document.getElementById('progressBar').style.backgroundColor = '#4CAF50';
+      localStorage.removeItem('pdfRecoveryState');
+      toggleRecovery();
+    }
+
+    function handleCompletion() {
+      document.getElementById('output').textContent = "Password not found.";
+      localStorage.removeItem('pdfRecoveryState');
+      toggleRecovery();
+    }
+
+    function toggleRecovery() {
+      recoveryState.isRunning = !recoveryState.isRunning;
+      updateUIState(recoveryState.isRunning);
+      if (!recoveryState.isRunning) saveProgress();
+    }
+
+    function updateUIState(isRunning) {
+      document.getElementById('unlockBtn').style.display = isRunning ? 'none' : 'inline';
+      document.getElementById('stopBtn').style.display = isRunning ? 'inline' : 'none';
+      document.getElementById('stopBtn').textContent = isRunning ? 'Pause' : 'Resume';
+    }
+
+    function saveProgress() {
+      localStorage.setItem('pdfRecoveryState', JSON.stringify({
+        ...recoveryState,
+        isRunning: false
+      }));
+    }
+
+    function updateMemoryUsage() {
+      if (window.performance?.memory) {
+        const usedMB = Math.round(window.performance.memory.usedJSHeapSize / 1048576);
+        document.getElementById('memoryUsage').textContent = `Memory Usage: ${usedMB}MB`;
+      }
+    }
+
+    function showError(message) {
+      document.getElementById('output').textContent = `Error: ${message}`;
+      document.getElementById('progressBar').style.width = '0%';
+      toggleRecovery();
+    }
+
+    function toggleResumeSection() {
+      const resumeSection = document.getElementById('resumeSection');
+      resumeSection.style.display = resumeSection.style.display === 'none' ? 'block' : 'none';
+    }
+
+    function toggleButton(buttonId) {
+      const button = document.getElementById(buttonId);
+      button.classList.toggle('active');
+    }
+
+    function toggleSpecialCharsField() {
+      const specialCharsField = document.getElementById('specialChars');
+      specialCharsField.classList.toggle('hidden');
+      specialCharsField.classList.toggle('active');
+      document.getElementById('useSpecialCharsBtn').classList.toggle('active');
+    }
+
+    window.addEventListener('beforeunload', () => {
+      if (recoveryState.isRunning) {
+        saveProgress();
+      }
+    });
+  </script>
+</body>
+</html>
